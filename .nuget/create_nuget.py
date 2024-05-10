@@ -20,7 +20,7 @@ if __name__ == "__main__":
     copyfile(source / "lib_lightgbm.dylib", osx_folder_path / "lib_lightgbm.dylib")
     copyfile(source / "lib_lightgbm.dll", windows_folder_path / "lib_lightgbm.dll")
     copyfile(source / "lightgbm.exe", windows_folder_path / "lightgbm.exe")
-    version = (current_dir.parent / 'VERSION.txt').read_text(encoding='utf-8').strip().replace('rc', '-rc')
+    version = (current_dir.parent / "VERSION.txt").read_text(encoding="utf-8").strip().replace("rc", "-rc")
     nuget_str = rf"""<?xml version="1.0"?>
     <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
     <metadata>
@@ -28,7 +28,7 @@ if __name__ == "__main__":
         <version>{version}</version>
         <authors>Guolin Ke</authors>
         <owners>Guolin Ke</owners>
-        <licenseUrl>https://github.com/microsoft/LightGBM/blob/master/LICENSE</licenseUrl>
+        <license type="expression">MIT</license>
         <projectUrl>https://github.com/microsoft/LightGBM</projectUrl>
         <requireLicenseAcceptance>false</requireLicenseAcceptance>
         <description>A fast, distributed, high performance gradient boosting framework</description>
@@ -75,6 +75,6 @@ if __name__ == "__main__":
     </Target>
     </Project>
     """
-    (current_dir / "LightGBM.nuspec").write_text(nuget_str, encoding='utf-8')
-    (current_dir / "build" / "LightGBM.props").write_text(prop_str, encoding='utf-8')
-    (current_dir / "build" / "LightGBM.targets").write_text(target_str, encoding='utf-8')
+    (current_dir / "LightGBM.nuspec").write_text(nuget_str, encoding="utf-8")
+    (current_dir / "build" / "LightGBM.props").write_text(prop_str, encoding="utf-8")
+    (current_dir / "build" / "LightGBM.targets").write_text(target_str, encoding="utf-8")

@@ -7,19 +7,45 @@ trigger:
     - v*
 pr:
 - master
+- release/*
 variables:
   AZURE: 'true'
-  PYTHON_VERSION: 3.9
+  PYTHON_VERSION: '3.11'
   CONDA_ENV: test-env
+  runCodesignValidationInjection: false
+  skipComponentGovernanceDetection: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 resources:
+  # The __work/ directory, where Azure DevOps writes the source files, needs to be read-write because
+  # LightGBM's CI jobs write files in the source directory.
+  #
+  # For all the containers included here, all other directories that Azure mounts in are mounted as read-only
+  # to minimize the risk of side effects from one run affecting future runs.
+  # ref: https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema/resources-containers-container
   containers:
-  - container: ubuntu1404
-    image: lightgbm/vsts-agent:ubuntu-14.04
+  - container: linux-artifact-builder
+    image: lightgbm/vsts-agent:manylinux_2_28_x86_64
+    mountReadOnly:
+      work: false
+      externals: true
+      tools: true
+      tasks: true
   - container: ubuntu-latest
-    image: 'ubuntu:latest'
+    image: 'ubuntu:22.04'
     options: "--name ci-container -v /usr/bin/docker:/tmp/docker:ro"
+    mountReadOnly:
+      work: false
+      externals: true
+      tools: true
+      tasks: true
   - container: rbase
-    image: rocker/r-base
+    image: wch1/r-debug
+    mountReadOnly:
+      work: false
+      externals: true
+      tools: true
+      tasks: true
 jobs:
 ###########################################
 - job: Linux
@@ -29,23 +55,25 @@ jobs:
     SETUP_CONDA: 'false'
     OS_NAME: 'linux'
     PRODUCES_ARTIFACTS: 'true'
-  pool: sh-ubuntu
-  container: ubuntu1404
+  pool: mariner-20240410-0
+  container: linux-artifact-builder
   strategy:
     matrix:
       regular:
         TASK: regular
+        PYTHON_VERSION: '3.9'
       sdist:
         TASK: sdist
-        PYTHON_VERSION: 3.7
+        PYTHON_VERSION: '3.7'
       bdist:
         TASK: bdist
+        PYTHON_VERSION: '3.8'
       inference:
         TASK: if-else
       mpi_source:
         TASK: mpi
         METHOD: source
-        PYTHON_VERSION: 3.8
+        PYTHON_VERSION: '3.8'
       gpu_source:
         TASK: gpu
         METHOD: source
@@ -55,17 +83,25 @@ jobs:
   - script: |
       echo "##vso[task.setvariable variable=BUILD_DIRECTORY]$BUILD_SOURCESDIRECTORY"
       echo "##vso[task.setvariable variable=LGB_VER]$(head -n 1 VERSION.txt)"
+      echo "##vso[task.prependpath]/usr/lib64/openmpi/bin"
       echo "##vso[task.prependpath]$CONDA/bin"
-      AMDAPPSDK_PATH=$BUILD_SOURCESDIRECTORY/AMDAPPSDK
-      echo "##vso[task.setvariable variable=AMDAPPSDK_PATH]$AMDAPPSDK_PATH"
-      LD_LIBRARY_PATH=$AMDAPPSDK_PATH/lib/x86_64:$LD_LIBRARY_PATH
-      echo "##vso[task.setvariable variable=LD_LIBRARY_PATH]$LD_LIBRARY_PATH"
-      echo "##vso[task.setvariable variable=OPENCL_VENDOR_PATH]$AMDAPPSDK_PATH/etc/OpenCL/vendors"
     displayName: 'Set variables'
-  - bash: $(Build.SourcesDirectory)/.ci/setup.sh
+  - script: |
+      git clean -d -f -x
+    displayName: 'Clean source directory'
+  - script: |
+      echo '$(Build.SourceVersion)' > '$(Build.ArtifactStagingDirectory)/commit.txt'
+    displayName: 'Add commit hash to artifacts archive'
+  - task: Bash@3
     displayName: Setup
-  - bash: $(Build.SourcesDirectory)/.ci/test.sh
+    inputs:
+      filePath: $(Build.SourcesDirectory)/.ci/setup.sh
+      targetType: filePath
+  - task: Bash@3
     displayName: Test
+    inputs:
+      filePath: $(Build.SourcesDirectory)/.ci/test.sh
+      targetType: filePath
   - task: PublishBuildArtifacts@1
     condition: and(succeeded(), in(variables['TASK'], 'regular', 'sdist', 'bdist', 'swig'), not(startsWith(variables['Build.SourceBranch'], 'refs/pull/')))
     inputs:
@@ -76,23 +112,22 @@ jobs:
 - job: Linux_latest
 ###########################################
   variables:
-    COMPILER: clang
+    COMPILER: clang-17
     DEBIAN_FRONTEND: 'noninteractive'
-    IN_UBUNTU_LATEST_CONTAINER: 'true'
+    IN_UBUNTU_BASE_CONTAINER: 'true'
     OS_NAME: 'linux'
     SETUP_CONDA: 'true'
-  pool: sh-ubuntu
+  pool: mariner-20240410-0
   container: ubuntu-latest
   strategy:
     matrix:
       regular:
         TASK: regular
-        PYTHON_VERSION: 3.6
       sdist:
         TASK: sdist
       bdist:
         TASK: bdist
-        PYTHON_VERSION: 3.8
+        PYTHON_VERSION: '3.9'
       inference:
         TASK: if-else
       mpi_source:
@@ -101,22 +136,23 @@ jobs:
       mpi_pip:
         TASK: mpi
         METHOD: pip
-        PYTHON_VERSION: 3.8
+        PYTHON_VERSION: '3.10'
       mpi_wheel:
         TASK: mpi
         METHOD: wheel
-        PYTHON_VERSION: 3.7
+        PYTHON_VERSION: '3.8'
       gpu_source:
         TASK: gpu
         METHOD: source
+        PYTHON_VERSION: '3.10'
       gpu_pip:
         TASK: gpu
         METHOD: pip
-        PYTHON_VERSION: 3.6
+        PYTHON_VERSION: '3.9'
       gpu_wheel:
         TASK: gpu
         METHOD: wheel
-        PYTHON_VERSION: 3.7
+        PYTHON_VERSION: '3.8'
       cpp_tests:
         TASK: cpp-tests
         METHOD: with-sanitizers
@@ -124,24 +160,30 @@ jobs:
   - script: |
       echo "##vso[task.setvariable variable=BUILD_DIRECTORY]$BUILD_SOURCESDIRECTORY"
       echo "##vso[task.setvariable variable=LGB_VER]$(head -n 1 VERSION.txt)"
-      CONDA=$HOME/miniconda
+      CONDA=$HOME/miniforge
       echo "##vso[task.setvariable variable=CONDA]$CONDA"
       echo "##vso[task.prependpath]$CONDA/bin"
-      AMDAPPSDK_PATH=$BUILD_SOURCESDIRECTORY/AMDAPPSDK
-      echo "##vso[task.setvariable variable=AMDAPPSDK_PATH]$AMDAPPSDK_PATH"
-      LD_LIBRARY_PATH=$AMDAPPSDK_PATH/lib/x86_64:$LD_LIBRARY_PATH
-      echo "##vso[task.setvariable variable=LD_LIBRARY_PATH]$LD_LIBRARY_PATH"
-      echo "##vso[task.setvariable variable=OPENCL_VENDOR_PATH]$AMDAPPSDK_PATH/etc/OpenCL/vendors"
     displayName: 'Set variables'
   # https://github.com/microsoft/azure-pipelines-agent/issues/2043#issuecomment-687983301
   - script: |
       /tmp/docker exec -t -u 0 ci-container \
       sh -c "apt-get update && apt-get -o Dpkg::Options::="--force-confold" -y install sudo"
     displayName: 'Install sudo'
-  - bash: $(Build.SourcesDirectory)/.ci/setup.sh
+  - script: |
+      sudo apt-get update
+      sudo apt-get install -y --no-install-recommends git
+      git clean -d -f -x
+    displayName: 'Clean source directory'
+  - task: Bash@3
     displayName: Setup
-  - bash: $(Build.SourcesDirectory)/.ci/test.sh
+    inputs:
+      filePath: $(Build.SourcesDirectory)/.ci/setup.sh
+      targetType: 'filePath'
+  - task: Bash@3
     displayName: Test
+    inputs:
+      filePath: $(Build.SourcesDirectory)/.ci/test.sh
+      targetType: 'filePath'
 ###########################################
 - job: QEMU_multiarch
 ###########################################
@@ -150,7 +192,7 @@ jobs:
     OS_NAME: 'linux'
     PRODUCES_ARTIFACTS: 'true'
   pool:
-    vmImage: ubuntu-latest
+    vmImage: ubuntu-22.04
   timeoutInMinutes: 180
   strategy:
     matrix:
@@ -170,6 +212,9 @@ jobs:
       docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
     displayName: 'Enable Docker multi-architecture support'
   - script: |
+      git clean -d -f -x
+    displayName: 'Clean source directory'
+  - script: |
       export ROOT_DOCKER_FOLDER=/LightGBM
       cat > docker.env <<EOF
       AZURE=$AZURE
@@ -185,14 +230,15 @@ jobs:
       BUILD_ARTIFACTSTAGINGDIRECTORY=$BUILD_ARTIFACTSTAGINGDIRECTORY
       EOF
       cat > docker-script.sh <<EOF
-      export CONDA=\$HOME/miniconda
-      export PATH=\$CONDA/bin:\$PATH
-      $ROOT_DOCKER_FOLDER/.ci/setup.sh || exit -1
-      $ROOT_DOCKER_FOLDER/.ci/test.sh || exit -1
+      export CONDA=\$HOME/miniforge
+      export PATH=\$CONDA/bin:/opt/rh/llvm-toolset-7.0/root/usr/bin:\$PATH
+      export LD_LIBRARY_PATH=/opt/rh/llvm-toolset-7.0/root/usr/lib64:\$LD_LIBRARY_PATH
+      $ROOT_DOCKER_FOLDER/.ci/setup.sh || exit 1
+      $ROOT_DOCKER_FOLDER/.ci/test.sh || exit 1
       EOF
-      IMAGE_URI="quay.io/pypa/manylinux2014_${ARCH}"
-      docker pull "${IMAGE_URI}" || exit -1
-      PLATFORM=$(docker inspect --format='{{.Os}}/{{.Architecture}}' "${IMAGE_URI}") || exit -1
+      IMAGE_URI="lightgbm/vsts-agent:manylinux2014_aarch64"
+      docker pull "${IMAGE_URI}" || exit 1
+      PLATFORM=$(docker inspect --format='{{.Os}}/{{.Architecture}}' "${IMAGE_URI}") || exit 1
       echo "detected image platform: ${PLATFORM}"
       docker run \
         --platform "${PLATFORM}" \
@@ -217,15 +263,15 @@ jobs:
     OS_NAME: 'macos'
     PRODUCES_ARTIFACTS: 'true'
   pool:
-    vmImage: 'macOS-10.14'
+    vmImage: 'macOS-11'
   strategy:
     matrix:
       regular:
         TASK: regular
-        PYTHON_VERSION: 3.7
+        PYTHON_VERSION: '3.10'
       sdist:
         TASK: sdist
-        PYTHON_VERSION: 3.8
+        PYTHON_VERSION: '3.9'
       bdist:
         TASK: bdist
       swig:
@@ -238,15 +284,24 @@ jobs:
   - script: |
       echo "##vso[task.setvariable variable=BUILD_DIRECTORY]$BUILD_SOURCESDIRECTORY"
       echo "##vso[task.setvariable variable=LGB_VER]$(head -n 1 VERSION.txt)"
-      CONDA=$AGENT_HOMEDIRECTORY/miniconda
+      CONDA=$AGENT_HOMEDIRECTORY/miniforge
       echo "##vso[task.setvariable variable=CONDA]$CONDA"
       echo "##vso[task.prependpath]$CONDA/bin"
       echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME_8_X64"
     displayName: 'Set variables'
-  - bash: $(Build.SourcesDirectory)/.ci/setup.sh
+  - script: |
+      git clean -d -f -x
+    displayName: 'Clean source directory'
+  - task: Bash@3
     displayName: Setup
-  - bash: $(Build.SourcesDirectory)/.ci/test.sh
+    inputs:
+      filePath: $(Build.SourcesDirectory)/.ci/setup.sh
+      targetType: filePath
+  - task: Bash@3
     displayName: Test
+    inputs:
+      filePath: $(Build.SourcesDirectory)/.ci/test.sh
+      targetType: filePath
   - task: PublishBuildArtifacts@1
     condition: and(succeeded(), in(variables['TASK'], 'regular', 'bdist', 'swig'), not(startsWith(variables['Build.SourceBranch'], 'refs/pull/')))
     inputs:
@@ -257,15 +312,15 @@ jobs:
 - job: Windows
 ###########################################
   pool:
-    vmImage: 'vs2017-win2016'
+    vmImage: 'windows-2019'
   strategy:
     matrix:
       regular:
         TASK: regular
-        PYTHON_VERSION: 3.6
+        PYTHON_VERSION: '3.10'
       sdist:
         TASK: sdist
-        PYTHON_VERSION: 3.8
+        PYTHON_VERSION: '3.9'
       bdist:
         TASK: bdist
       swig:
@@ -277,10 +332,17 @@ jobs:
       Write-Host "##vso[task.prependpath]$env:CONDA\Scripts"
     displayName: 'Set Variables'
   - script: |
+      git clean -d -f -x
+    displayName: 'Clean source directory'
+  - script: |
       cmd /c "powershell -ExecutionPolicy Bypass -File %BUILD_SOURCESDIRECTORY%/.ci/install_opencl.ps1"
     condition: eq(variables['TASK'], 'bdist')
     displayName: 'Install OpenCL'
   - script: |
+      cmd /c "conda config --remove channels defaults"
+      cmd /c "conda config --add channels nodefaults"
+      cmd /c "conda config --add channels conda-forge"
+      cmd /c "conda config --set channel_priority strict"
       cmd /c "conda init powershell"
       cmd /c "powershell -ExecutionPolicy Bypass -File %BUILD_SOURCESDIRECTORY%/.ci/test_windows.ps1"
     displayName: Test
@@ -295,12 +357,19 @@ jobs:
 ###########################################
   condition: not(startsWith(variables['Build.SourceBranch'], 'refs/pull/'))
   pool:
-    vmImage: 'ubuntu-latest'
+    vmImage: 'ubuntu-22.04'
   container: rbase
   steps:
   - script: |
+      git clean -d -f -x
+    displayName: 'Clean source directory'
+  - script: |
       LGB_VER=$(head -n 1 VERSION.txt | sed "s/rc/-/g")
-      sh build-cran-package.sh || exit -1
+      R_LIB_PATH=~/Rlib
+      export R_LIBS=${R_LIB_PATH}
+      mkdir -p ${R_LIB_PATH}
+      RDscript -e "install.packages(c('R6', 'data.table', 'jsonlite', 'knitr', 'markdown', 'Matrix', 'RhpcBLASctl'),  lib = '${R_LIB_PATH}', dependencies = c('Depends', 'Imports', 'LinkingTo'), repos = 'https://cran.rstudio.com', Ncpus = parallel::detectCores())" || exit 1
+      sh build-cran-package.sh --r-executable=RD || exit 1
       mv lightgbm_${LGB_VER}.tar.gz $(Build.ArtifactStagingDirectory)/lightgbm-${LGB_VER}-r-cran.tar.gz
     displayName: 'Build CRAN R-package'
   - task: PublishBuildArtifacts@1
@@ -322,7 +391,7 @@ jobs:
   - R_artifact
   condition: and(succeeded(), not(startsWith(variables['Build.SourceBranch'], 'refs/pull/')))
   pool:
-    vmImage: 'ubuntu-latest'
+    vmImage: 'ubuntu-22.04'
   steps:
   # Create archives with complete source code included (with git submodules)
   - task: ArchiveFiles@2

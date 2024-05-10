@@ -21,10 +21,13 @@ TEMP_SOURCE_DIR <- file.path(TEMP_R_DIR, "src")
   out_list <- list(
     "flags" = character(0L)
     , "keyword_args" = character(0L)
+    , "make_args" = character(0L)
   )
   for (arg in args) {
-    if (any(grepl("=", arg))) {
-      split_arg <- strsplit(arg, "=")[[1L]]
+    if (any(grepl("^\\-j[0-9]+", arg))) {  # nolint: non_portable_path
+        out_list[["make_args"]] <- arg
+    } else if (any(grepl("=", arg, fixed = TRUE))) {
+      split_arg <- strsplit(arg, "=", fixed = TRUE)[[1L]]
       arg_name <- split_arg[[1L]]
       arg_value <- split_arg[[2L]]
       out_list[["keyword_args"]][[arg_name]] <- arg_value
@@ -36,6 +39,7 @@ TEMP_SOURCE_DIR <- file.path(TEMP_R_DIR, "src")
 }
 parsed_args <- .parse_args(args)
 
+SKIP_VIGNETTES <- "--no-build-vignettes" %in% parsed_args[["flags"]]
 USING_GPU <- "--use-gpu" %in% parsed_args[["flags"]]
 USING_MINGW <- "--use-mingw" %in% parsed_args[["flags"]]
 USING_MSYS2 <- "--use-msys2" %in% parsed_args[["flags"]]
@@ -51,7 +55,8 @@ ARGS_TO_DEFINES <- c(
 )
 
 recognized_args <- c(
-  "--skip-install"
+  "--no-build-vignettes"
+  , "--skip-install"
   , "--use-gpu"
   , "--use-mingw"
   , "--use-msys2"
@@ -65,7 +70,7 @@ unrecognized_args <- setdiff(given_args, recognized_args)
 if (length(unrecognized_args) > 0L) {
   msg <- paste0(
     "Unrecognized arguments: "
-    , paste0(unrecognized_args, collapse = ", ")
+    , toString(unrecognized_args)
   )
   stop(msg)
 }
@@ -95,17 +100,32 @@ if (length(keyword_args) > 0L) {
   for (i in seq_len(length(keyword_args))) {
     arg_name <- names(keyword_args)[[i]]
     define_name <- ARGS_TO_DEFINES[[arg_name]]
-    arg_value <- shQuote(keyword_args[[arg_name]])
+    arg_value <- shQuote(normalizePath(keyword_args[[arg_name]], winslash = "/"))
     cmake_args_to_add <- c(cmake_args_to_add, paste0(define_name, "=", arg_value))
   }
   install_libs_content <- gsub(
     pattern = paste0("command_line_args <- NULL")
     , replacement = paste0(
-      "command_line_args <- c(\""
-      , paste(cmake_args_to_add, collapse = "\", \"")
+      "command_line_args <- c(\'"
+      , paste(cmake_args_to_add, collapse = "', '")
+      , "')"
+    )
+    , x = install_libs_content
+    , fixed = TRUE
+  )
+}
+
+# if provided, set '-j' in 'make' commands in install.libs.R
+if (length(parsed_args[["make_args"]]) > 0L) {
+  install_libs_content <- gsub(
+    pattern = "make_args_from_build_script <- character(0L)"
+    , replacement = paste0(
+      "make_args_from_build_script <- c(\""
+      , paste0(parsed_args[["make_args"]], collapse = "\", \"")
       , "\")"
     )
     , x = install_libs_content
+    , fixed = TRUE
   )
 }
 
@@ -127,7 +147,7 @@ if (length(keyword_args) > 0L) {
     on_windows <- .Platform$OS.type == "windows"
     has_processx <- suppressMessages({
       suppressWarnings({
-        require("processx")  # nolint
+        require("processx")  # nolint: undesirable_function
       })
     })
     if (has_processx && on_windows) {
@@ -351,6 +371,7 @@ LGB_VERSION <- gsub(
   pattern = "rc"
   , replacement = "-"
   , x = LGB_VERSION
+  , fixed = TRUE
 )
 
 # DESCRIPTION has placeholders for version
@@ -361,63 +382,42 @@ description_contents <- gsub(
   pattern = "~~VERSION~~"
   , replacement = LGB_VERSION
   , x = description_contents
+  , fixed = TRUE
 )
 description_contents <- gsub(
   pattern = "~~DATE~~"
   , replacement = as.character(Sys.Date())
   , x = description_contents
+  , fixed = TRUE
+)
+description_contents <- gsub(
+  pattern = "~~CXXSTD~~"
+  , replacement = "C++11"
+  , x = description_contents
+  , fixed = TRUE
 )
 writeLines(description_contents, DESCRIPTION_FILE)
-
-# CMake-based builds can't currently use R's builtin routine registration,
-# so have to update NAMESPACE manually, with a statement like this:
-#
-# useDynLib(lib_lightgbm, LGBM_DatasetCreateFromFile_R, ...)
-#
-# See https://cran.r-project.org/doc/manuals/r-release/R-exts.html#useDynLib for
-# documentation of this approach, where the NAMESPACE file uses a statement like
-# useDynLib(foo, myRoutine, myOtherRoutine)
-NAMESPACE_FILE <- file.path(TEMP_R_DIR, "NAMESPACE")
-namespace_contents <- readLines(NAMESPACE_FILE)
-dynlib_line <- grep(
-  pattern = "^useDynLib"
-  , x = namespace_contents
-)
-
-c_api_contents <- readLines(file.path(TEMP_SOURCE_DIR, "src", "lightgbm_R.h"))
-c_api_contents <- c_api_contents[grepl("^LIGHTGBM_C_EXPORT", c_api_contents)]
-c_api_contents <- gsub(
-  pattern = "LIGHTGBM_C_EXPORT SEXP "
-  , replacement = ""
-  , x = c_api_contents
-)
-c_api_symbols <- gsub(
-  pattern = "\\(.*"
-  , replacement = ""
-  , x = c_api_contents
-)
-dynlib_statement <- paste0(
-  "useDynLib(lib_lightgbm, "
-  , paste0(c_api_symbols, collapse = ", ")
-  , ")"
-)
-namespace_contents[dynlib_line] <- dynlib_statement
-writeLines(namespace_contents, NAMESPACE_FILE)
 
 # NOTE: --keep-empty-dirs is necessary to keep the deep paths expected
 #       by CMake while also meeting the CRAN req to create object files
 #       on demand
-.run_shell_command("R", c("CMD", "build", TEMP_R_DIR, "--keep-empty-dirs"))
+r_build_args <- c("CMD", "build", TEMP_R_DIR, "--keep-empty-dirs")
+if (isTRUE(SKIP_VIGNETTES)) {
+  r_build_args <- c(r_build_args, "--no-build-vignettes")
+}
+.run_shell_command("R", r_build_args)
 
 # Install the package
 version <- gsub(
-  "Version: ",
-  "",
-  grep(
-    "Version: "
-    , readLines(con = file.path(TEMP_R_DIR, "DESCRIPTION"))
+  pattern = "Version: ",
+  replacement = "",
+  x = grep(
+    pattern = "Version: "
+    , x = readLines(con = file.path(TEMP_R_DIR, "DESCRIPTION"))
     , value = TRUE
+    , fixed = TRUE
   )
+  , fixed = TRUE
 )
 tarball <- file.path(getwd(), sprintf("lightgbm_%s.tar.gz", version))
 

@@ -17,11 +17,17 @@
 #'
 #' @examples
 #' \donttest{
+#' \dontshow{setLGBMthreads(2L)}
+#' \dontshow{data.table::setDTthreads(1L)}
 #' Logit <- function(x) log(x / (1.0 - x))
 #' data(agaricus.train, package = "lightgbm")
 #' train <- agaricus.train
 #' dtrain <- lgb.Dataset(train$data, label = train$label)
-#' setinfo(dtrain, "init_score", rep(Logit(mean(train$label)), length(train$label)))
+#' set_field(
+#'   dataset = dtrain
+#'   , field_name = "init_score"
+#'   , data = rep(Logit(mean(train$label)), length(train$label))
+#' )
 #' data(agaricus.test, package = "lightgbm")
 #' test <- agaricus.test
 #'
@@ -31,6 +37,7 @@
 #'     , max_depth = -1L
 #'     , min_data_in_leaf = 1L
 #'     , min_sum_hessian_in_leaf = 1.0
+#'     , num_threads = 2L
 #' )
 #' model <- lgb.train(
 #'     params = params
@@ -67,7 +74,9 @@ lgb.interprete <- function(model,
   leaf_index_dt <- data.table::as.data.table(x = pred_mat)
   leaf_index_mat_list <- lapply(
     X = leaf_index_dt
-    , FUN = function(x) matrix(x, ncol = num_class, byrow = TRUE)
+    , FUN = matrix
+    , ncol = num_class
+    , byrow = TRUE
   )
 
   # Get list of trees
@@ -79,7 +88,7 @@ lgb.interprete <- function(model,
   )
 
   for (i in seq_along(idxset)) {
-    tree_interpretation_dt_list[[i]] <- single.row.interprete(
+    tree_interpretation_dt_list[[i]] <- .single_row_interprete(
       tree_dt = tree_dt
       , num_class = num_class
       , tree_index_mat = tree_index_mat_list[[i]]
@@ -144,7 +153,7 @@ single.tree.interprete <- function(tree_dt,
 }
 
 #' @importFrom data.table := rbindlist setorder
-multiple.tree.interprete <- function(tree_dt,
+.multiple_tree_interprete <- function(tree_dt,
                                      tree_index,
                                      leaf_index) {
 
@@ -179,7 +188,7 @@ multiple.tree.interprete <- function(tree_dt,
 }
 
 #' @importFrom data.table set setnames
-single.row.interprete <- function(tree_dt, num_class, tree_index_mat, leaf_index_mat) {
+.single_row_interprete <- function(tree_dt, num_class, tree_index_mat, leaf_index_mat) {
 
   # Prepare vector list
   tree_interpretation <- vector(mode = "list", length = num_class)
@@ -187,7 +196,7 @@ single.row.interprete <- function(tree_dt, num_class, tree_index_mat, leaf_index
   # Loop throughout each class
   for (i in seq_len(num_class)) {
 
-    next_interp_dt <- multiple.tree.interprete(
+    next_interp_dt <- .multiple_tree_interprete(
       tree_dt = tree_dt
       , tree_index = tree_index_mat[, i]
       , leaf_index = leaf_index_mat[, i]

@@ -1,5 +1,4 @@
 library(lightgbm)
-library(methods)
 
 # We load in the agaricus dataset
 # In this example, we are aiming to predict whether a mushroom is edible
@@ -147,8 +146,8 @@ bst <- lgb.train(
     , valids = valids
 )
 
-# information can be extracted from lgb.Dataset using getinfo
-label <- getinfo(dtest, "label")
+# information can be extracted from lgb.Dataset using get_field()
+label <- get_field(dtest, "label")
 pred <- predict(bst, test$data)
 err <- as.numeric(sum(as.integer(pred > 0.5) != label)) / length(label)
 print(paste("test-error=", err))
